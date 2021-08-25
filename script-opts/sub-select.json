@@ -1,0 +1,32 @@
+[
+    {
+        "alang": "*",
+        "slang": "forced"
+    },
+    {
+        "alang": "j[ap]n?",
+        "slang": [
+            "eng?",
+            "und"
+        ],
+        "blacklist": [
+            "sign"
+        ]
+    },
+    {
+        "alang": "eng?",
+        "slang": "eng?"
+    },
+    {
+        "alang": "no",
+        "slang": "no"
+    },
+    {
+        "alang": "*",
+        "slang": "eng?"
+    },
+    {
+        "alang": "*",
+        "slang": "und"
+    }
+]
