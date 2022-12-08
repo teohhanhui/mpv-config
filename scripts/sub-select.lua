@@ -34,6 +34,9 @@ local o = {
     --observe audio switches and reselect the subtitles when alang changes
     observe_audio_switches = false,
 
+    --only select forced subtitles if they are explicitly included in slang
+    explicit_forced_subs = false,
+
     --the folder that contains the 'sub-select.json' file
     config = "~~/script-opts"
 }
@@ -55,11 +58,47 @@ local alang_priority = mp.get_property_native("alang", {})
 local audio_tracks = {}
 local sub_tracks = {}
 
+--returns a table that stores the given table t as the __index in its metatable
+--creates a prototypally inherited table
+local function redirect_table(t, new)
+    return setmetatable(new or {}, { __index = t })
+end
+
+--evaluates and runs the given string in both Lua 5.1 and 5.2
+--the name argument is used for error reporting
+--provides the mpv modules and the fb module to the string
+local function evaluate_string(str, env)
+    env = redirect_table(_G, env)
+    env.mp = redirect_table(mp)
+    env.msg = redirect_table(msg)
+    env.utils = redirect_table(utils)
+
+    local chunk, err
+    if setfenv then
+        chunk, err = loadstring(str)
+        if chunk then setfenv(chunk, env) end
+    else
+        chunk, err = load(str, nil, 't', env)
+    end
+    if not chunk then
+        msg.warn('failed to load string:', str)
+        msg.error(err)
+        chunk = function() return nil end
+    end
+
+    return chunk()
+end
+
 --anticipates the default audio track
 --returns the node for the predicted track
 --this whole function can be skipped if the user decides to load the subtitles asynchronously instead,
 --or if `--aid` is not set to `auto`
-local function find_default_audio()
+local function predict_audio()
+    --if the option is not set to auto then it is easy
+    local opt = mp.get_property("options/aid", "auto")
+    if opt == "no" then return {}
+    elseif opt ~= "auto" then return audio_tracks[tonumber(opt)] end
+
     local num_tracks = #audio_tracks
     if num_tracks == 1 then return audio_tracks[1]
     elseif num_tracks == 0 then return {} end
@@ -94,6 +133,7 @@ local function find_default_audio()
         end
     end
 
+    msg.verbose("predicted audio track is "..tostring(highest_priority.id))
     return highest_priority
 end
 
@@ -106,73 +146,95 @@ local function set_track(type, id)
 end
 
 --checks if the given audio matches the given track preference
-local function is_valid_audio(alang, pref)
-    if pref.alang == '*' then return true end
-
+local function is_valid_audio(audio, pref)
     local alangs = type(pref.alang) == "string" and {pref.alang} or pref.alang
 
     for _,lang in ipairs(alangs) do
-        msg.verbose("Checking " .. lang)
-        if alang then
-            if alang:find(lang) then return true end
-        elseif lang == "no" then return true end
+        msg.debug("Checking for valid audio:", lang)
+
+        if not audio and lang == "no" then
+            return true
+        elseif audio then
+            if lang == '*' then
+                return true
+            elseif lang == "forced" then
+                if audio.forced then return true end
+            elseif lang == "default" then
+                if audio.default then return true end
+            else
+                if audio.lang and audio.lang:find(lang) then return true end
+            end
+        end
     end
     return false
 end
 
 --checks if the given sub matches the given track preference
 local function is_valid_sub(sub, slang, pref)
-    if slang == "default" and not sub.default then return false
-    elseif slang == "forced" and not sub.forced then return false
-    elseif not sub.lang:find(slang) and sub.lang ~= "*" then return false end
+    msg.trace("checking sub", slang, "against track", utils.to_string(sub))
+
+    -- Do not try to un-nest these if statements, it will break detection of default and forced tracks.
+    -- I've already had to un-nest these statements twice due to this mistake, don't let it happen again.
+    if slang == "default" then
+        if not sub.default then return false end
+    elseif slang == "forced" then
+        if not sub.forced then return false end
+    else
+        if sub.forced and o.explicit_forced_subs then return false end
+        if not sub.lang:find(slang) and slang ~= "*" then return false end
+    end
 
     local title = sub.title
 
-    --whitelist/blacklist handling
-    if pref.whitelist then
-        if not title then return false end
-        title = title:lower()
-        local found = false
+    -- if the whitelist is not set then we don't need to find anything
+    local passes_whitelist = not pref.whitelist
+    local passes_blacklist = true
 
+    -- whitelist/blacklist handling
+    if pref.whitelist and title then
         for _,word in ipairs(pref.whitelist) do
-            if title:find(word) then found = true end
+            if title:lower():find(word) then passes_whitelist = true end
         end
-
-        if not found then return false end
     end
 
-    if pref.blacklist then
-        if not title then return true end
-        title = title:lower()
-
+    if pref.blacklist and title then
         for _,word in ipairs(pref.blacklist) do
-            if title:find(word) then return false end
+            if title:lower():find(word) then passes_blacklist = false end
         end
     end
 
-    return true
+    msg.trace(string.format("%s %s whitelist: %s | %s blacklist: %s",
+        title,
+        passes_whitelist and "passed" or "failed", utils.to_string(pref.whitelist),
+        passes_blacklist and "passed" or "failed", utils.to_string(pref.blacklist)
+    ))
+    return passes_whitelist and passes_blacklist
 end
 
 --scans the track list and selects subtitle tracks which match the track preferences
-local function select_subtitles(alang)
+local function select_subtitles(audio)
+    msg.debug("select subtitle for", utils.to_string(audio))
+
     --searching the selection presets for one that applies to this track
     for _,pref in ipairs(prefs) do
-        msg.trace("testing pref: " .. utils.to_string(pref))
-        if is_valid_audio(alang, pref) then
+        msg.trace("checking pref:", utils.to_string(pref))
+
+        if is_valid_audio(audio, pref) then
             --checks if any of the subtitle tracks match the preset for the current audio
             local slangs = type(pref.slang) == "string" and {pref.slang} or pref.slang
-            for _,lang in ipairs(slangs) do
+            msg.verbose("valid audio preference found:", utils.to_string(pref.alang))
+
+            for _,slang in ipairs(slangs) do
+                msg.debug("checking for valid sub:", slang)
 
                 --special handling when we want to disable subtitles
-                if pref.slang == "no" then
-                    set_track("sid", "no")
-                    return
-                end
+                if slang == "no" then return set_track("sid", "no") end
 
                 for _,sub_track in ipairs(sub_tracks) do
-                    if is_valid_sub(sub_track, lang, pref) then
-                        set_track("sid", sub_track.id)
-                        return
+                    if  is_valid_sub(sub_track, slang, pref)
+                        and (not pref.condition or (evaluate_string('return '..pref.condition, { audio = audio, sub = sub_track }) == true))
+                    then
+                        return set_track("sid", sub_track.id)
                     end
                 end
             end
@@ -182,10 +244,12 @@ end
 
 --extract the language code from an audio track node and pass it to select_subtitles
 local function process_audio(audio)
+    if not audio then audio = {} end
     latest_audio = audio
-    local alang = audio.lang
-    if not next(audio) then alang = nil end
-    select_subtitles(alang)
+
+    -- if the audio track has no fields we assume that there is no actual track selected
+    if audio and not next(audio) then audio = nil end
+    select_subtitles(audio)
 end
 
 --returns the audio node for the currently playing audio track
@@ -196,26 +260,18 @@ end
 
 --select subtitles asynchronously after playback start
 local function async_load()
-    process_audio( find_current_audio() )
+    local current = find_current_audio()
+    process_audio(current)
+    if o.observe_audio_switches then latest_audio = current end
 end
 
 --select subtitles synchronously during the on_preloaded hook
 local function preload()
-    local opt = mp.get_property("options/aid", "auto")
-
-    if opt == "no" then
-        process_audio( {} )
-        return
-    elseif opt ~= "auto" then
-        process_audio( audio_tracks[tonumber(opt)] )
-        return
-    end
-
-    local audio = find_default_audio()
-    msg.verbose("predicted audio track is "..tostring(audio.id))
+    local audio = predict_audio()
 
     if o.force_prediction and next(audio) then set_track("aid", audio.id) end
     process_audio(audio)
+    if o.observe_audio_switches then latest_audio = audio end
 end
 
 local track_auto_selection = true
@@ -265,7 +321,6 @@ if o.preload then
     mp.add_hook('on_preloaded', 30, function()
         if not continue_script() then return end
         preload()
-        if o.observe_audio_switches then latest_audio = find_default_audio() end
     end)
 
     --double check if the predicted subtitle was correct
@@ -276,7 +331,6 @@ else
     mp.register_event("file-loaded", function()
         if not continue_script() then return end
         async_load()
-        if o.observe_audio_switches then latest_audio = find_current_audio() end
     end)
 end
 
@@ -286,6 +340,8 @@ if o.observe_audio_switches then
         if aid ~= "auto" then reselect_subtitles() end
     end)
 end
+
+mp.observe_property('track-list/count', 'number', read_track_list)
 
 --force subtitle selection during playback
 mp.register_script_message("select-subtitles", async_load)
@@ -300,5 +356,4 @@ mp.register_script_message("sub-select", function(arg)
 
     if not continue_script() then return end
     async_load()
-    if o.observe_audio_switches then latest_audio = find_current_audio() end
 end)
