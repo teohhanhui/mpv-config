@@ -22,7 +22,9 @@
         ],
         "slang": [
             "eng?",
-            "und"
+            "und",
+            "jpn",
+            "ja"
         ],
         "blacklist": [
             "forced",
