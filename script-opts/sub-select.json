@@ -5,7 +5,9 @@
             "ja"
         ],
         "slang": [
+            "en%-us",
             "eng?",
+            "en%-jp",
             "und"
         ],
         "blacklist": [
@@ -21,7 +23,9 @@
             "ja"
         ],
         "slang": [
+            "en%-us",
             "eng?",
+            "en%-jp",
             "und",
             "jpn",
             "ja"
@@ -35,6 +39,7 @@
     {
         "alang": "eng?",
         "slang": [
+            "en%-us",
             "eng?",
             "und"
         ],
@@ -48,6 +53,7 @@
     {
         "alang": "eng?",
         "slang": [
+            "en%-us",
             "eng?",
             "und"
         ],
@@ -64,6 +70,7 @@
     {
         "alang": "*",
         "slang": [
+            "en%-us",
             "eng?",
             "und"
         ],
@@ -72,6 +79,7 @@
     {
         "alang": "*",
         "slang": [
+            "en%-us",
             "eng?",
             "und"
         ]
